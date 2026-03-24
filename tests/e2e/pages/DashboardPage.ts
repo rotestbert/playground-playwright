@@ -51,8 +51,9 @@ export class DashboardPage extends BasePage {
    * Use this only for test teardown — it permanently removes the account.
    */
   async deleteAccount(): Promise<void> {
-    await this.deleteAccountLink.click();
-    // /delete_account shows a confirmation page; click Continue to finish
+    // Navigate directly rather than clicking the nav link so teardown is not
+    // blocked by any consent overlay that might intercept the click.
+    await this.page.goto('/delete_account');
     await this.page.locator('[data-qa="continue-button"]').click();
   }
 }

@@ -26,6 +26,10 @@ export default defineConfig({
     ['html', { outputFolder: 'playwright-report', open: 'never' }],
   ],
 
+  /* Per-test timeout — increased to 60 s because fixture setup (register + login
+     against a live external site) can take 15–25 s before the test body runs. */
+  timeout: 60_000,
+
   /* Shared settings for all the projects below. */
   use: {
     /* Base URL to use in actions like `await page.goto('/')`. */

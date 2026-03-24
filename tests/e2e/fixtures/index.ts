@@ -45,6 +45,20 @@ export const test = base.extend<{
 }>({
   isCi: [!!process.env['CI'], { option: true }],
 
+  // Override the built-in `page` fixture to auto-dismiss the GDPR consent overlay
+  // (fc-consent-root) that intercepts pointer events on automationexercise.com.
+  // Registering here (awaited) ensures the handler is active for both test body
+  // and fixture teardown across all tests.
+  page: async ({ page }, use) => {
+    await page.addLocatorHandler(
+      page.locator('.fc-consent-root'),
+      async () => {
+        await page.locator('.fc-cta-consent').click({ timeout: 5_000 }).catch(() => {});
+      },
+    );
+    await use(page);
+  },
+
   registeredUser: async ({ page }, use) => {
     const user = generateTestUser();
 
