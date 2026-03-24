@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git config:*)",
+      "Bash(npm install:*)",
+      "Bash(npx playwright:*)",
+      "Bash(npm run:*)",
+      "WebFetch(domain:automationexercise.com)"
+    ]
+  }
+}
