@@ -1,0 +1,396 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Scalars
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""ISO-8601 date-time string."""
+scalar DateTime
+
+"""Arbitrary JSON value."""
+scalar JSON
+
+"""Absolute URL string."""
+scalar URL
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Directives
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+Requires the caller to be authenticated at the given role level.
+ADMIN ⊃ USER ⊃ ANONYMOUS (each role inherits lower-level access).
+Unauthenticated callers receive UNAUTHENTICATED; insufficiently privileged
+callers receive FORBIDDEN.
+"""
+directive @auth(requires: Role = USER) on FIELD_DEFINITION
+
+"""Marks a field or enum value as deprecated."""
+directive @deprecated(reason: String = "No longer supported") on FIELD_DEFINITION | ENUM_VALUE
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Enums
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""Platform role controlling access to protected operations."""
+enum Role {
+  ADMIN
+  USER
+}
+
+"""Lifecycle state of a customer order."""
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+"""Sort direction for ordered collections."""
+enum SortDirection {
+  ASC
+  DESC
+}
+
+"""Fields by which a product list can be sorted."""
+enum ProductSortField {
+  PRICE
+  NAME
+  CREATED_AT
+  RATING
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Object types
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+A registered platform user.  Password is never exposed via the API.
+"""
+type User {
+  id: ID!
+  email: String!
+  name: String!
+  role: Role!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  orders: [Order!]!
+  reviews: [Review!]!
+}
+
+"""A product listed in the catalogue."""
+type Product {
+  id: ID!
+  name: String!
+  description: String
+  price: Float!
+  stock: Int!
+  category: Category!
+  images: [URL!]!
+  reviews: [Review!]!
+  averageRating: Float
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+"""Top-level grouping for products."""
+type Category {
+  id: ID!
+  name: String!
+  slug: String!
+  products: [Product!]!
+}
+
+"""A customer's purchase, containing one or more line items."""
+type Order {
+  id: ID!
+  user: User!
+  items: [OrderItem!]!
+  status: OrderStatus!
+  total: Float!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+"""A single product line within an order."""
+type OrderItem {
+  id: ID!
+  product: Product!
+  quantity: Int!
+  unitPrice: Float!
+  subtotal: Float!
+}
+
+"""A rating and optional comment left by a verified purchaser."""
+type Review {
+  id: ID!
+  user: User!
+  product: Product!
+  """Integer 1–5."""
+  rating: Int!
+  body: String
+  createdAt: DateTime!
+}
+
+"""Returned on successful authentication."""
+type AuthPayload {
+  token: String!
+  user: User!
+  expiresAt: DateTime!
+}
+
+# ─── Relay-style pagination types ────────────────────────────────────────────
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+  totalCount: Int!
+}
+
+type ProductEdge {
+  cursor: String!
+  node: Product!
+}
+
+type ProductConnection {
+  edges: [ProductEdge!]!
+  pageInfo: PageInfo!
+}
+
+type UserEdge {
+  cursor: String!
+  node: User!
+}
+
+type UserConnection {
+  edges: [UserEdge!]!
+  pageInfo: PageInfo!
+}
+
+type OrderEdge {
+  cursor: String!
+  node: Order!
+}
+
+type OrderConnection {
+  edges: [OrderEdge!]!
+  pageInfo: PageInfo!
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Input types
+# ─────────────────────────────────────────────────────────────────────────────
+
+input RegisterInput {
+  """Valid e-mail address. Must be unique."""
+  email: String!
+  """Minimum 8 characters, at least one digit."""
+  password: String!
+  """1–100 characters."""
+  name: String!
+}
+
+input LoginInput {
+  email: String!
+  password: String!
+}
+
+input UpdateUserInput {
+  """1–100 characters."""
+  name: String
+  """Valid e-mail address."""
+  email: String
+  """Minimum 8 characters, at least one digit."""
+  password: String
+}
+
+input CreateProductInput {
+  """1–200 characters."""
+  name: String!
+  description: String
+  """Must be > 0."""
+  price: Float!
+  """Must be ≥ 0."""
+  stock: Int!
+  categoryId: ID!
+  images: [URL!]
+}
+
+input UpdateProductInput {
+  name: String
+  description: String
+  """Must be > 0 if provided."""
+  price: Float
+  """Must be ≥ 0 if provided."""
+  stock: Int
+  categoryId: ID
+  images: [URL!]
+}
+
+input OrderItemInput {
+  productId: ID!
+  """Must be ≥ 1."""
+  quantity: Int!
+}
+
+input CreateOrderInput {
+  """At least one item required."""
+  items: [OrderItemInput!]!
+}
+
+input UpdateOrderStatusInput {
+  orderId: ID!
+  status: OrderStatus!
+}
+
+input AddReviewInput {
+  productId: ID!
+  """Integer 1–5 inclusive."""
+  rating: Int!
+  body: String
+}
+
+input ProductFilterInput {
+  categoryId: ID
+  """Inclusive lower price bound."""
+  minPrice: Float
+  """Inclusive upper price bound."""
+  maxPrice: Float
+  inStock: Boolean
+  """Full-text search against name and description."""
+  search: String
+}
+
+input ProductSortInput {
+  field: ProductSortField!
+  direction: SortDirection!
+}
+
+"""Relay-style forward and backward pagination."""
+input PaginationInput {
+  first: Int
+  after: String
+  last: Int
+  before: String
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Query
+# ─────────────────────────────────────────────────────────────────────────────
+
+type Query {
+  # ── Public ──────────────────────────────────────────────────────────────────
+
+  """Returns a single product by ID, or null if not found."""
+  product(id: ID!): Product
+
+  """Paginated product catalogue with optional filtering and sorting."""
+  products(
+    filter: ProductFilterInput
+    sort: ProductSortInput
+    pagination: PaginationInput
+  ): ProductConnection!
+
+  """Returns a single category by ID, or null if not found."""
+  category(id: ID!): Category
+
+  """All top-level categories."""
+  categories: [Category!]!
+
+  # ── Authenticated (USER) ─────────────────────────────────────────────────────
+
+  """The currently authenticated user."""
+  me: User @auth(requires: USER)
+
+  """
+  Fetch an order by ID.
+  Users may only fetch their own orders; admins may fetch any.
+  """
+  order(id: ID!): Order @auth(requires: USER)
+
+  """Paginated list of the authenticated user's orders."""
+  myOrders(pagination: PaginationInput): OrderConnection! @auth(requires: USER)
+
+  # ── Admin only ───────────────────────────────────────────────────────────────
+
+  """Fetch any user by ID. Admin only."""
+  user(id: ID!): User @auth(requires: ADMIN)
+
+  """Paginated list of all users. Admin only."""
+  users(pagination: PaginationInput): UserConnection! @auth(requires: ADMIN)
+
+  """Paginated list of all orders across all users. Admin only."""
+  allOrders(pagination: PaginationInput): OrderConnection! @auth(requires: ADMIN)
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mutation
+# ─────────────────────────────────────────────────────────────────────────────
+
+type Mutation {
+  # ── Public ───────────────────────────────────────────────────────────────────
+
+  """Register a new account and return an auth token."""
+  register(input: RegisterInput!): AuthPayload!
+
+  """Authenticate and return an auth token."""
+  login(input: LoginInput!): AuthPayload!
+
+  # ── Authenticated (USER) ─────────────────────────────────────────────────────
+
+  """Invalidate the current session token."""
+  logout: Boolean! @auth(requires: USER)
+
+  """Update the authenticated user's own profile."""
+  updateMe(input: UpdateUserInput!): User! @auth(requires: USER)
+
+  """Create a new order for the authenticated user."""
+  createOrder(input: CreateOrderInput!): Order! @auth(requires: USER)
+
+  """Add a review to a product. One review per user per product."""
+  addReview(input: AddReviewInput!): Review! @auth(requires: USER)
+
+  # ── Admin only ───────────────────────────────────────────────────────────────
+
+  """Permanently delete a user account. Admin only."""
+  deleteUser(id: ID!): Boolean! @auth(requires: ADMIN)
+
+  """Add a new product to the catalogue. Admin only."""
+  createProduct(input: CreateProductInput!): Product! @auth(requires: ADMIN)
+
+  """Update an existing product. Admin only."""
+  updateProduct(id: ID!, input: UpdateProductInput!): Product! @auth(requires: ADMIN)
+
+  """Remove a product from the catalogue. Admin only."""
+  deleteProduct(id: ID!): Boolean! @auth(requires: ADMIN)
+
+  """Advance an order's lifecycle status. Admin only."""
+  updateOrderStatus(input: UpdateOrderStatusInput!): Order! @auth(requires: ADMIN)
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subscription
+# ─────────────────────────────────────────────────────────────────────────────
+
+type Subscription {
+  """
+  Emits the updated Order whenever its status changes.
+  The subscriber must own the order or be an admin.
+  """
+  orderStatusUpdated(orderId: ID!): Order! @auth(requires: USER)
+
+  """
+  Emits the updated Product whenever its stock level changes.
+  Public — no authentication required.
+  """
+  productInventoryUpdated(productId: ID!): Product!
+
+  """
+  Emits each new Review as it is submitted for a product.
+  Public — no authentication required.
+  """
+  newReview(productId: ID!): Review!
+}

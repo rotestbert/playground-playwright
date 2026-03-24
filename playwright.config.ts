@@ -74,5 +74,31 @@ export default defineConfig({
         },
       },
     },
+
+    /**
+     * GraphQL project — no browser. Runs tests/graphql/ specs via Playwright's
+     * request context (HTTP) and the ws package (WebSocket subscriptions).
+     *
+     * Required env vars:
+     *   GRAPHQL_URL      — HTTP GraphQL endpoint  (default: http://localhost:4000/graphql)
+     *   GRAPHQL_WS_URL   — WebSocket endpoint      (default: ws://localhost:4000/graphql)
+     *   GQL_USER_TOKEN   — valid USER-role Bearer token
+     *   GQL_ADMIN_TOKEN  — valid ADMIN-role Bearer token
+     *   GQL_USER_ID      — ID of the user behind GQL_USER_TOKEN
+     *   GQL_USER_ORDER_ID— ID of an order owned by that user
+     *   GQL_PRODUCT_ID   — ID of any seeded product
+     *   GQL_CATEGORY_ID  — ID of any seeded category
+     */
+    {
+      name: 'graphql',
+      testDir: './tests/graphql',
+      use: {
+        baseURL: process.env['GRAPHQL_URL'] ?? 'http://localhost:4000/graphql',
+        extraHTTPHeaders: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+      },
+    },
   ],
 });
