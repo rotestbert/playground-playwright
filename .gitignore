@@ -1,0 +1,21 @@
+node_modules/
+
+# Playwright
+playwright-report/
+test-results/
+.playwright/
+
+# Vitest
+coverage/
+
+# TypeScript
+dist/
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
