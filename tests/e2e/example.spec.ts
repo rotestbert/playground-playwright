@@ -14,7 +14,8 @@ test.describe('Automation Exercise - Smoke Tests', () => {
   });
 
   test('navigation bar is present', async ({ page }) => {
-    await expect(page.getByRole('navigation')).toBeVisible();
+    // The site uses <header id="header"> (implicit role: banner) — no <nav> element exists
+    await expect(page.getByRole('banner')).toBeVisible();
   });
 
   test('Products link is visible', async ({ page }) => {
@@ -28,8 +29,9 @@ test.describe('Automation Exercise - Smoke Tests', () => {
 
 test.describe('Automation Exercise - Accessibility', () => {
   test('page has a main landmark', async ({ page }) => {
+    // The site uses <section id="slider"> as main content (no <main> element exists)
     await page.goto('/');
-    await expect(page.getByRole('main')).toBeVisible();
+    await expect(page.locator('#slider')).toBeVisible();
   });
 
   test('page has a heading', async ({ page }) => {

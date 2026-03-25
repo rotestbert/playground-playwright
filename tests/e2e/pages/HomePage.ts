@@ -14,7 +14,7 @@ export class HomePage extends BasePage {
 
   constructor(page: Page) {
     super(page);
-    this.navBar = page.getByRole('navigation');
+    this.navBar = page.getByRole('banner');
     this.logo = page.locator('#header .logo');
     this.productsLink = page.getByRole('link', { name: 'Products' });
     this.signupLoginLink = page.getByRole('link', { name: 'Signup / Login' });
