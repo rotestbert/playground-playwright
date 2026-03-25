@@ -14,8 +14,10 @@ export default defineConfig({
   /* Fail the build on CI if you accidentally left test.only in the source code. */
   forbidOnly: !!process.env['CI'],
 
-  /* Retry on CI only */
-  retries: process.env['CI'] ? 2 : 0,
+  /* Retry on CI; also retry once locally to tolerate external-site flakiness
+     (the live automationexercise.com site occasionally redirects authenticated
+     sessions under parallel load, causing checkout tests to time out). */
+  retries: process.env['CI'] ? 2 : 1,
 
   /* 4 workers for parallel execution */
   workers: 4,
@@ -47,6 +49,36 @@ export default defineConfig({
 
   /* Output directory for test artifacts */
   outputDir: 'test-results',
+
+  /* ── Visual regression ──────────────────────────────────────────────────────
+   * Global snapshot comparison settings used by toHaveScreenshot().
+   * The 0.1 % pixel-ratio threshold is the CI gate; adjust per-assertion for
+   * pages with inherently dynamic content (e.g. live prices). */
+  expect: {
+    toHaveScreenshot: {
+      /* Maximum fraction of pixels allowed to differ before a test fails.
+         0.001 = 0.1 % — tight enough to catch layout shifts, loose enough to
+         tolerate sub-pixel antialiasing differences across OS/GPU combos. */
+      maxDiffPixelRatio: 0.001,
+
+      /* Per-pixel colour-distance tolerance (0–1). 0.2 absorbs minor
+         antialiasing variations without masking real colour regressions. */
+      threshold: 0.2,
+
+      /* Freeze CSS/JS animations so frames are deterministic. */
+      animations: 'disabled',
+
+      /* Inject a CSS reset that forces zero animation/transition durations
+         for any custom keyframes the global option misses. */
+      stylePath: './tests/visual/visual-reset.css',
+    },
+  },
+
+  /* Store snapshots next to the visual test directory so they are easy to
+     review and commit. The {projectName} token keeps chromium/firefox/webkit
+     baselines separate if additional browser projects are ever added. */
+  snapshotPathTemplate:
+    '{testDir}/__snapshots__/{testFileName}/{arg}-{projectName}{ext}',
 
   /* Configure projects for major browsers */
   projects: [
@@ -102,6 +134,84 @@ export default defineConfig({
           Accept: 'application/json',
           'Content-Type': 'application/json',
         },
+      },
+    },
+
+    /**
+     * Performance project — Chromium only, single worker, no retries.
+     *
+     * Measures Core Web Vitals (TTFB, FCP, LCP, CLS, INP) for every page
+     * and load-tests each API endpoint at 50 concurrent requests.
+     * Writes JSON artefacts + an HTML report with Chart.js charts to
+     *   playwright-report/perf-report.html
+     *
+     * Run:  npm run test:perf
+     */
+    {
+      name: 'performance',
+      testDir: './tests/performance',
+      /* 2 min per test — load tests (100 concurrent req) + Web Vitals
+         collection (page.waitForTimeout calls) can take 90+ seconds. */
+      timeout: 120_000,
+      /* Never retry — flaky timing numbers skew percentile calculations. */
+      retries: 0,
+      /* Single worker so concurrent tests don't compete for network/CPU. */
+      workers: 1,
+      use: {
+        ...devices['Desktop Chrome'],
+        /* Fixed viewport for reproducible LCP paint areas. */
+        viewport: { width: 1_280, height: 720 },
+        /* Disable screenshots/video — not needed for perf data collection. */
+        screenshot: 'off',
+        video: 'off',
+        trace: 'off',
+      },
+    },
+
+    /**
+     * Accessibility project — Chromium only.
+     *
+     * Uses @axe-core/playwright to audit every page against WCAG 2.1 AA.
+     * Also covers keyboard navigation, screen reader compatibility, and focus
+     * management. Writes a severity-grouped markdown report to:
+     *   playwright-report/a11y-report.md
+     *
+     * Run:  npm run test:a11y
+     */
+    {
+      name: 'accessibility',
+      testDir: './tests/accessibility',
+      /* Authenticated fixture setup (register + login) adds 15-25 s before the
+         test body; 90 s gives plenty of headroom for axe audits on top. */
+      timeout: 90_000,
+      use: {
+        ...devices['Desktop Chrome'],
+      },
+    },
+
+    /**
+     * Visual regression project — Chromium only.
+     *
+     * Using a single browser guarantees consistent pixel-level baselines.
+     * Snapshots live in tests/visual/__snapshots__/ and must be committed.
+     *
+     * Run:            npm run test:visual
+     * Update bases:   npm run test:visual:update
+     */
+    {
+      name: 'visual',
+      testDir: './tests/visual',
+      snapshotDir: './tests/visual/__snapshots__',
+      /* Authenticated fixture setup (register + login + add-to-cart) adds
+         15–25 s before the test body; allow 120 s so viewport loops don't OOT. */
+      timeout: 120_000,
+      use: {
+        ...devices['Desktop Chrome'],
+        /* Visual tests take their own screenshots — disable the global captures
+           so we don't accumulate duplicates in test-results/. */
+        screenshot: 'off',
+        video: 'off',
+        trace: 'off',
       },
     },
   ],

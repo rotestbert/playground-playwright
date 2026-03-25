@@ -149,7 +149,7 @@ export interface ApiUserPayload {
  * Timestamp suffix prevents email collisions across parallel workers.
  */
 export function generateApiUser(): ApiUserPayload {
-  const id = Date.now();
+  const id = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
   return {
     name: `API User ${id}`,
     email: `apiuser.${id}@mailtest.dev`,

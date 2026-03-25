@@ -20,7 +20,11 @@ export class OrderConfirmedPage extends BasePage {
 
     this.successHeading = page.locator('[data-qa="order-placed"]');
     this.successMessage = page.locator('#form > div > div > p');
-    this.downloadInvoiceButton = page.locator('[data-qa="download-invoice"]');
+    this.downloadInvoiceButton = page
+      .locator('[data-qa="download-invoice"]')
+      .or(page.getByRole('link', { name: /download invoice/i }))
+      .or(page.getByRole('button', { name: /download invoice/i }))
+      .first();
     this.continueButton = page.getByRole('link', { name: /continue/i });
   }
 

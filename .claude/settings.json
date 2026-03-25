@@ -2,7 +2,57 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "Read(//c/Users/TAALARO9/Personal/playground-playwright/**)"
+      "Read(//c/Users/TAALARO9/Personal/playground-playwright/**)",
+      "Edit(/.claude/skills/playwright-test-gen/**)",
+      "Edit(/.claude/skills/coverage-analyzer/**)",
+      "Edit(/.claude/skills/api-test-gen/**)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(npx eslint:*)",
+      "Bash(chmod +x \"c:/Users/TAALARO9/Personal/playground-playwright/scripts/update-snapshots.sh\")",
+      "Bash(find . -not -path */node_modules/* -not -path */.git/* -not -path */coverage/* -not -path */test-results/* -not -path */playwright-report/* -type f -o -type d)",
+      "Bash(grep -E '\\\\.\\(ts|js|json|md|sh|css\\)$|^\\\\./\\(src|tests|scripts|eslint-plugin-test-conventions\\)')",
+      "Bash(npx tsc:*)",
+      "Bash(node -e \":*)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\TAALARO9\\Personal\\playground-playwright\\.claude\\skills",
+      "C:\\Users\\TAALARO9\\Personal\\playground-playwright\\.claude",
+      "c:\\Users\\TAALARO9\\Personal\\playground-playwright\\.github"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'FILE=\"$CLAUDE_FILE_PATHS\"; if [[ \"$FILE\" == src/* ]] && [[ \"$FILE\" != *.test.* ]] && [[ \"$FILE\" != *.spec.* ]]; then echo \"⚠️ Source file modified without corresponding test. Consider generating tests.\"; fi'"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'FILE=\"$CLAUDE_FILE_PATHS\"; if [[ \"$FILE\" == tests/*.spec.ts ]] || [[ \"$FILE\" == tests/*.test.ts ]] || [[ \"$FILE\" =~ tests/.*\\.(spec|test)\\.ts$ ]]; then echo \"Running ESLint on $FILE...\"; npx eslint \"$FILE\" --max-warnings=0 2>&1 || true; fi'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [[ \"$CLAUDE_TOOL_INPUT\" =~ git\\ commit ]] && [[ ! \"$CLAUDE_TOOL_INPUT\" =~ --no-verify ]]; then npm run test:unit -- --reporter=dot 2>&1 | tail -5; fi'"
+          }
+        ]
+      }
     ]
   }
 }

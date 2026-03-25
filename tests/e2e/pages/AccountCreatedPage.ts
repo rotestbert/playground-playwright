@@ -23,6 +23,8 @@ export class AccountCreatedPage extends BasePage {
 
   /** Click Continue to proceed to the home page as a logged-in user. */
   async continue(): Promise<void> {
+    await this.continueButton.scrollIntoViewIfNeeded();
+    await this.continueButton.waitFor({ state: 'visible', timeout: 30_000 });
     await this.continueButton.click();
   }
 }

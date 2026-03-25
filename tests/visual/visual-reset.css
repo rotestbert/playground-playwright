@@ -1,0 +1,27 @@
+/*
+ * visual-reset.css
+ * ----------------
+ * Injected into every page before a toHaveScreenshot() call via the global
+ * `expect.toHaveScreenshot.stylePath` config option.
+ *
+ * Goal: produce deterministic, flicker-free snapshots by zeroing out any
+ * animation or transition that Playwright's built-in `animations: 'disabled'`
+ * option might not reach (custom keyframes, scroll-driven animations, etc.).
+ */
+
+*,
+*::before,
+*::after {
+  animation-duration: 0s !important;
+  animation-delay: 0s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
+}
+
+/* Freeze scroll-driven and view-transition animations (modern browsers). */
+@media (prefers-reduced-motion: no-preference) {
+  * {
+    scroll-behavior: auto !important;
+  }
+}

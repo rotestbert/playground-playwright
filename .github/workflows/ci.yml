@@ -1,0 +1,701 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CI/CD Test Suite
+#
+# Triggers & what runs:
+#   PR (always)           → lint + unit tests (coverage gate)
+#   PR + label 'e2e'      → + E2E shards (4) + API + accessibility
+#   push to main          → everything above + visual regression
+#   schedule (nightly)    → everything + performance tests
+#   workflow_dispatch     → manual full run (optionally include performance)
+#
+# Required secrets:
+#   SLACK_WEBHOOK_URL     — Incoming Webhook URL for failure notifications
+#
+# Optional secrets / vars:
+#   BASE_URL              — Override test target (default: https://automationexercise.com)
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: CI/CD Test Suite
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 2 * * *'   # Nightly at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      run_performance:
+        description: 'Include performance tests'
+        type: boolean
+        default: false
+
+# Cancel in-flight PR runs when a new push arrives; let main/schedule finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: '20'
+  # Playwright caches browsers keyed on the lock-file so a version bump
+  # automatically invalidates the cache and triggers a fresh install.
+  PLAYWRIGHT_BROWSERS_PATH: ~/.cache/ms-playwright
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Reusable step fragments (via YAML anchors)
+# ──────────────────────────────────────────────────────────────────────────────
+# NOTE: GitHub Actions does not support top-level YAML anchors yet, so shared
+# logic is expressed as composite steps inside each job. The cache key is kept
+# identical across all jobs so they share the same cached binaries.
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 1. LINT — fast feedback on every PR (< 1 min)
+  # ────────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint test files
+        run: npm run lint:tests
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 2. UNIT TESTS — coverage gate (80 % threshold enforced by Vitest)
+  #    Runs on: every PR, push to main, schedule, workflow_dispatch
+  # ────────────────────────────────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests & Coverage
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'pull_request' ||
+      github.event_name == 'push'         ||
+      github.event_name == 'schedule'     ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Vitest exits non-zero when any threshold is breached — this IS the gate.
+      - name: Run unit tests with coverage (80 % threshold)
+        run: |
+          npx vitest run \
+            --coverage \
+            --coverage.provider=v8 \
+            --coverage.reporter=text \
+            --coverage.reporter=json-summary \
+            --coverage.reporter=html \
+            --coverage.thresholds.lines=80 \
+            --coverage.thresholds.statements=80 \
+            --coverage.thresholds.branches=80 \
+            --coverage.thresholds.functions=80
+
+      # Parse summary JSON for downstream jobs / step summary
+      - name: Extract coverage numbers
+        if: always()
+        id: cov
+        run: |
+          FILE=coverage/coverage-summary.json
+          if [ -f "$FILE" ]; then
+            L=$(jq -r '.total.lines.pct'      "$FILE")
+            S=$(jq -r '.total.statements.pct' "$FILE")
+            B=$(jq -r '.total.branches.pct'   "$FILE")
+            F=$(jq -r '.total.functions.pct'  "$FILE")
+            echo "lines=$L"      >> "$GITHUB_OUTPUT"
+            echo "statements=$S" >> "$GITHUB_OUTPUT"
+            echo "branches=$B"   >> "$GITHUB_OUTPUT"
+            echo "functions=$F"  >> "$GITHUB_OUTPUT"
+            {
+              echo "### 📊 Coverage Report"
+              echo "| Metric     | Coverage | Threshold |"
+              echo "|------------|----------|-----------|"
+              echo "| Lines      | ${L}%    | 80%       |"
+              echo "| Statements | ${S}%    | 80%       |"
+              echo "| Branches   | ${B}%    | 80%       |"
+              echo "| Functions  | ${F}%    | 80%       |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 3. E2E TESTS — sharded across 4 runners (chromium + firefox + webkit)
+  #    Runs on: PR + label 'e2e', push to main, schedule, workflow_dispatch
+  # ────────────────────────────────────────────────────────────────────────────
+  e2e-tests:
+    name: E2E Tests — Shard ${{ matrix.shard }}/4
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e')) ||
+      github.event_name == 'push'                                                                        ||
+      github.event_name == 'schedule'                                                                    ||
+      github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false   # collect all shard results even when one shard fails
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Cache keyed on OS + lock-file. A Playwright version bump busts the cache.
+      - name: Restore Playwright browser cache
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: pw-browsers-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: pw-browsers-${{ runner.os }}-
+
+      - name: Install Playwright browsers (cache miss)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      # Even on cache hit, system libs might be missing on a fresh runner image.
+      - name: Install browser system dependencies (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium firefox webkit
+
+      - name: Run E2E shard ${{ matrix.shard }}/4
+        run: |
+          npx playwright test \
+            --project=chromium \
+            --project=firefox  \
+            --project=webkit   \
+            --shard=${{ matrix.shard }}/4 \
+            --reporter=blob
+        env:
+          CI: true
+          BASE_URL: ${{ secrets.BASE_URL || 'https://automationexercise.com' }}
+
+      # Blob reports from all shards are merged in the next job.
+      - name: Upload blob report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-blob-shard-${{ matrix.shard }}
+          path: blob-report/
+          retention-days: 1   # only needed until merge step completes
+
+      # Screenshots, traces, and videos captured on failure.
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts-shard-${{ matrix.shard }}
+          path: test-results/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 4. MERGE E2E REPORTS — combine 4 blob shards into one HTML report
+  # ────────────────────────────────────────────────────────────────────────────
+  merge-e2e-reports:
+    name: Merge E2E Reports
+    runs-on: ubuntu-latest
+    needs: e2e-tests
+    # Run even when shards failed so we always get a consolidated report.
+    if: always() && needs.e2e-tests.result != 'skipped'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download all shard blob reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: e2e-blob-shard-*
+          path: all-blob-reports
+          merge-multiple: true
+
+      - name: Merge blob reports → HTML
+        run: |
+          npx playwright merge-reports \
+            --reporter=html \
+            ./all-blob-reports
+
+      - name: Add E2E summary to job summary
+        if: always()
+        run: |
+          SHARDS_STATUS="${{ needs.e2e-tests.result }}"
+          {
+            echo "### 🎭 E2E Tests"
+            echo "Shards result: **${SHARDS_STATUS}**"
+            echo ""
+            echo "Download the \`e2e-report-html\` artifact to browse the full report."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload merged HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report-html
+          path: playwright-report/
+          retention-days: 14
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 5. API TESTS
+  #    Runs on: PR + label 'e2e', push to main, schedule, workflow_dispatch
+  # ────────────────────────────────────────────────────────────────────────────
+  api-tests:
+    name: API Tests
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e')) ||
+      github.event_name == 'push'                                                                        ||
+      github.event_name == 'schedule'                                                                    ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # API project uses Playwright's request context — no browser needed,
+      # but the Playwright CLI still requires the package to be installed.
+      - name: Restore Playwright browser cache
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: pw-browsers-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: pw-browsers-${{ runner.os }}-
+
+      - name: Install Playwright (cache miss)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Run API tests
+        run: npx playwright test --project=api --reporter=list,html
+        env:
+          CI: true
+          BASE_URL: ${{ secrets.BASE_URL || 'https://automationexercise.com' }}
+
+      - name: Upload API report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-report
+          path: playwright-report/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 6. ACCESSIBILITY TESTS (WCAG 2.1 AA)
+  #    Runs on: PR + label 'e2e', push to main, schedule, workflow_dispatch
+  # ────────────────────────────────────────────────────────────────────────────
+  accessibility-tests:
+    name: Accessibility Tests
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e')) ||
+      github.event_name == 'push'                                                                        ||
+      github.event_name == 'schedule'                                                                    ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore Playwright browser cache
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: pw-browsers-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: pw-browsers-${{ runner.os }}-
+
+      - name: Install Playwright (cache miss)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install browser system dependencies (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Run accessibility tests
+        run: npx playwright test --project=accessibility --reporter=list,html
+        env:
+          CI: true
+          BASE_URL: ${{ secrets.BASE_URL || 'https://automationexercise.com' }}
+
+      - name: Upload accessibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accessibility-report
+          path: playwright-report/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 7. VISUAL REGRESSION — pixel-diff against committed baselines
+  #    Runs on: push to main, schedule, workflow_dispatch
+  #    NOTE: Baselines were captured in this same CI environment. If you update
+  #    snapshots locally (npm run test:visual:update), commit them before pushing.
+  # ────────────────────────────────────────────────────────────────────────────
+  visual-regression:
+    name: Visual Regression Tests
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'push'          ||
+      github.event_name == 'schedule'      ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore Playwright browser cache
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: pw-browsers-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: pw-browsers-${{ runner.os }}-
+
+      - name: Install Playwright (cache miss)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install browser system dependencies (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Run visual regression tests
+        run: npx playwright test --project=visual --reporter=list,html
+        env:
+          CI: true
+          BASE_URL: ${{ secrets.BASE_URL || 'https://automationexercise.com' }}
+
+      # Upload actual/diff/expected images so failures can be reviewed side-by-side.
+      - name: Upload diff screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-diffs
+          path: |
+            test-results/**/*-diff.png
+            test-results/**/*-actual.png
+            test-results/**/*-expected.png
+          retention-days: 14
+
+      - name: Upload visual report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-report
+          path: playwright-report/
+          retention-days: 14
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 8. PERFORMANCE TESTS — Core Web Vitals + API load (nightly or manual)
+  #    Runs on: schedule, workflow_dispatch (when run_performance=true)
+  # ────────────────────────────────────────────────────────────────────────────
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_performance == true)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore Playwright browser cache
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: pw-browsers-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: pw-browsers-${{ runner.os }}-
+
+      - name: Install Playwright (cache miss)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install browser system dependencies (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Run performance tests (single worker — no contention)
+        run: npx playwright test --project=performance --reporter=list,html
+        env:
+          CI: true
+          BASE_URL: ${{ secrets.BASE_URL || 'https://automationexercise.com' }}
+
+      - name: Upload performance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-report
+          path: playwright-report/
+          # Keep perf data longer for trend analysis
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 9. PR COMMENT — post / update a sticky comment with all results + coverage
+  #    Runs after all jobs finish, only on pull_request events.
+  # ────────────────────────────────────────────────────────────────────────────
+  pr-comment:
+    name: Post PR Test Summary
+    runs-on: ubuntu-latest
+    needs:
+      - lint
+      - unit-tests
+      - merge-e2e-reports
+      - api-tests
+      - accessibility-tests
+    # always() ensures we post even when some jobs were skipped or failed.
+    if: always() && github.event_name == 'pull_request'
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage
+        continue-on-error: true
+
+      - name: Find and upsert PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            // ── Coverage ──────────────────────────────────────────────────────
+            const statusIcon = (r) =>
+              r === 'success' ? '✅' :
+              r === 'failure' ? '❌' :
+              r === 'skipped' ? '⏭️' : '⚠️';
+
+            let coverageSection = '_Coverage report not available_';
+            try {
+              const raw  = fs.readFileSync('coverage/coverage-summary.json', 'utf8');
+              const { total: t } = JSON.parse(raw);
+              const pct  = (m) => `**${t[m].pct}%**`;
+              const gate = (m) => t[m].pct >= 80 ? '✅' : '❌';
+              coverageSection = [
+                '| Metric | Coverage | Gate (80%) |',
+                '|--------|----------|------------|',
+                `| Lines      | ${pct('lines')}      | ${gate('lines')}      |`,
+                `| Statements | ${pct('statements')} | ${gate('statements')} |`,
+                `| Branches   | ${pct('branches')}   | ${gate('branches')}   |`,
+                `| Functions  | ${pct('functions')}  | ${gate('functions')}  |`,
+              ].join('\n');
+            } catch (_) { /* coverage artifact absent — non-blocking */ }
+
+            // ── Job results ───────────────────────────────────────────────────
+            const lint    = '${{ needs.lint.result }}';
+            const unit    = '${{ needs.unit-tests.result }}';
+            const e2e     = '${{ needs.merge-e2e-reports.result }}';
+            const api     = '${{ needs.api-tests.result }}';
+            const a11y    = '${{ needs.accessibility-tests.result }}';
+
+            const runUrl  = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            const sha     = '${{ github.sha }}'.slice(0, 7);
+
+            const body = `## 🧪 Test Results
+
+            | Job | Status |
+            |-----|--------|
+            | Lint | ${statusIcon(lint)} ${lint} |
+            | Unit Tests & Coverage | ${statusIcon(unit)} ${unit} |
+            | E2E Tests (4 shards) | ${statusIcon(e2e)} ${e2e} |
+            | API Tests | ${statusIcon(api)} ${api} |
+            | Accessibility (WCAG 2.1 AA) | ${statusIcon(a11y)} ${a11y} |
+
+            <details>
+            <summary>📊 Coverage Breakdown</summary>
+
+            ${coverageSection}
+
+            </details>
+
+            ---
+            _Commit \`${sha}\` · [View full workflow run](${runUrl}) · ${new Date().toUTCString()}_`;
+
+            // ── Upsert comment ────────────────────────────────────────────────
+            const { data: comments } = await github.rest.issues.listComments({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const marker  = '## 🧪 Test Results';
+            const existing = comments.find(
+              (c) => c.user.type === 'Bot' && c.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.info(`Updated existing comment #${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+              core.info('Created new PR comment');
+            }
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 10. SLACK NOTIFICATION — fires on any test failure
+  # ────────────────────────────────────────────────────────────────────────────
+  notify-failure:
+    name: Notify Slack on Failure
+    runs-on: ubuntu-latest
+    needs:
+      - lint
+      - unit-tests
+      - e2e-tests
+      - api-tests
+      - accessibility-tests
+      - visual-regression
+      - performance-tests
+    if: |
+      always() && (
+        needs.lint.result             == 'failure' ||
+        needs.unit-tests.result       == 'failure' ||
+        needs.e2e-tests.result        == 'failure' ||
+        needs.api-tests.result        == 'failure' ||
+        needs.accessibility-tests.result == 'failure' ||
+        needs.visual-regression.result   == 'failure' ||
+        needs.performance-tests.result   == 'failure'
+      )
+    steps:
+      - name: Build list of failed jobs
+        id: info
+        run: |
+          FAILED=""
+          [ "${{ needs.lint.result }}"                == 'failure' ] && FAILED="$FAILED• lint\n"
+          [ "${{ needs.unit-tests.result }}"          == 'failure' ] && FAILED="$FAILED• unit-tests\n"
+          [ "${{ needs.e2e-tests.result }}"           == 'failure' ] && FAILED="$FAILED• e2e-tests\n"
+          [ "${{ needs.api-tests.result }}"           == 'failure' ] && FAILED="$FAILED• api-tests\n"
+          [ "${{ needs.accessibility-tests.result }}" == 'failure' ] && FAILED="$FAILED• accessibility-tests\n"
+          [ "${{ needs.visual-regression.result }}"   == 'failure' ] && FAILED="$FAILED• visual-regression\n"
+          [ "${{ needs.performance-tests.result }}"   == 'failure' ] && FAILED="$FAILED• performance-tests\n"
+          echo "failed_jobs=$FAILED" >> "$GITHUB_OUTPUT"
+
+      - name: Send Slack alert
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {
+              "text": "❌ CI failure on *${{ github.repository }}* (${{ github.ref_name }})",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "❌ Test Suite Failed" }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repo:*\n<${{ github.server_url }}/${{ github.repository }}|${{ github.repository }}>"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch / Trigger:*\n`${{ github.ref_name }}` via `${{ github.event_name }}`"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Author:*\n${{ github.actor }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Commit:*\n<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|`${{ github.sha }}`>"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Failed jobs:*\n${{ steps.info.outputs.failed_jobs }}"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "style": "danger",
+                      "text": { "type": "plain_text", "text": "View Workflow Run" },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
